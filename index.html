@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Wire Cutter</title>
+  <title>Wire Cutter Portal</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -15,6 +15,7 @@
       background: #0f1117;
       font-family: 'Courier New', monospace;
       color: #e0e0e0;
+      padding: 1rem;
     }
 
     .card {
@@ -35,10 +36,12 @@
       display: inline-block;
       margin-right: 8px;
       animation: pulse 1.5s infinite;
+      flex-shrink: 0;
     }
 
     .dot.error { background: #ff4444; animation: none; }
     .dot.loading { background: #ffaa00; }
+    .dot.stale { background: #ffaa00; animation: none; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -68,9 +71,11 @@
       letter-spacing: 0.05em;
       margin: 1rem 0 1.5rem;
       min-height: 2rem;
+      word-break: break-all;
     }
 
     .ip-display.error { color: #ff4444; font-size: 1rem; }
+    .ip-display.stale { color: #ffaa00; }
 
     .btn {
       display: inline-block;
@@ -93,10 +98,27 @@
     .btn-primary:hover { background: #00cc6a; }
     .btn-primary:disabled { background: #1f4a36; color: #555; cursor: not-allowed; }
 
+    .btn-ghost {
+      background: transparent;
+      color: #888;
+      border: 1px solid #2a2d3a;
+      margin-left: 0.5rem;
+    }
+
+    .btn-ghost:hover { color: #e0e0e0; border-color: #444; }
+
     .countdown {
       margin-top: 1.2rem;
       font-size: 0.78rem;
       color: #444;
+      min-height: 1rem;
+    }
+
+    .note {
+      margin-top: 1rem;
+      font-size: 0.75rem;
+      color: #ffaa00;
+      line-height: 1.5;
     }
 
     .divider {
@@ -108,16 +130,23 @@
     .updated {
       font-size: 0.75rem;
       color: #555;
+      line-height: 1.6;
+    }
+
+    .hint {
+      font-size: 0.7rem;
+      color: #3a3d4a;
+      margin-top: 0.6rem;
     }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>✂️ Wire Cutter</h1>
+    <h1>⚡ Wire Cutter Portal</h1>
 
     <div class="status-line">
       <span class="dot loading" id="dot"></span>
-      <span id="status-text">Locating machine...</span>
+      <span id="status-text">Looking for the machine...</span>
     </div>
 
     <div class="ip-display" id="ip-display">—</div>
@@ -125,210 +154,201 @@
     <button class="btn btn-primary" id="connect-btn" disabled onclick="connectNow()">
       Connect
     </button>
+    <button class="btn btn-ghost" id="refresh-btn" onclick="fetchIP()">
+      Refresh
+    </button>
 
     <div class="countdown" id="countdown"></div>
+    <div class="note" id="note" style="display:none"></div>
 
     <hr class="divider"/>
-    <div class="updated" id="last-updated">Last updated: —</div>
+    <div class="updated" id="last-updated">Last seen: —</div>
+    <div class="hint">You must be on the same network as the machine.</div>
   </div>
 
   <script>
     // ── CONFIG ──────────────────────────────────────────────
-    // Your Worker URL from `npx wrangler deploy` — no trailing slash.
-    // GET /ip is public, so there is NO key in this file at all.
-    const BIN_ID = "6a854e40da38895dfef5d53c";
-    // Set the bin to PUBLIC in JSONBin so no key is needed here. A key in
-    // this file is readable by anyone who opens the page, and a JSONBin
-    // *master* key can write to ALL your bins - not just this one.
-    const API_KEY = "$2a$10$xIUsgBA0tRBALwzoMAjI8.xLLqZdn7eyQZKo4GgzlKA33hJ8d3y2O";
-    const ESP32_PATH = "/";      // "/" serves breadboardv3.html
-    const AUTO_REDIRECT = false; // true = jump automatically after 3s
-    // The board only publishes on boot and on IP change - there is no
-    // heartbeat. So a long age means "the IP hasn't moved", NOT "the board
-    // is off". Stale warnings are therefore disabled; set a number of
-    // minutes here to re-enable them.
-    const STALE_MINS = null;
-    // A successful lookup is cached in localStorage for this many minutes.
-    // Refreshing the page inside that window reuses the cached IP and makes
-    // ZERO network requests. Without this, a lab full of students hitting
-    // refresh is the single fastest way to burn the monthly quota - the
-    // retry backoff only protects the failure path, not repeated successes.
-    const CACHE_MINS = 15;
-    const CACHE_KEY  = "wirecutter_ip_cache";
+    // Both come from your Supabase project: Settings -> API Keys.
+    // Use the PUBLIC key - labelled either "anon public" (a long JWT
+    // starting "eyJ") or "publishable" (starting "sb_publishable_").
+    // Never the secret / service_role key.
+    //
+    // This page is public, so whatever you put here is public too.
+    // supabase_schema.sql limits this key to reading device_status and
+    // appending log rows - it cannot read student emails or job history.
+    const SUPABASE_URL      = "https://kkcafoottgitdemorykh.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_6BjS43xIvQU4EODO4fmMig_9s29zwyt";
+
+    const ESP32_PATH = "/";      // path to open on the machine
+
+    // The machine republishes every 10 minutes. If the newest timestamp is
+    // older than this, it's almost certainly switched off - so we show the
+    // address but don't send anyone to it automatically.
+    const STALE_AFTER_MS = 15 * 60 * 1000;
     // ────────────────────────────────────────────────────────
 
     let currentIP = null;
     let countdownTimer = null;
 
-    function readCache() {
-      try {
-        const raw = localStorage.getItem(CACHE_KEY);
-        if (!raw) return null;
-        const c = JSON.parse(raw);
-        const ageMin = (Date.now() - c.ts) / 60000;
-        return ageMin < CACHE_MINS ? c : null;
-      } catch { return null; }
-    }
-
-    function writeCache(ip, uptimeS, binTime) {
-      try {
-        localStorage.setItem(CACHE_KEY,
-          JSON.stringify({ ip, uptimeS, binTime, ts: Date.now() }));
-      } catch { /* private mode / storage full - just skip caching */ }
-    }
-
-    // force=true skips the cache (the Refresh button).
-    async function fetchIP(force) {
-      if (!force) {
-        const c = readCache();
-        if (c) {
-          currentIP = c.ip;
-          setReady(c.ip, c.uptimeS, c.binTime, true);
-          document.getElementById("countdown").textContent =
-            "Press Connect to open the breadboard tool";
-          return;   // no network request at all
-        }
+    // Supabase has two generations of public key and they want different
+    // headers. The older "anon" key is a JWT and is normally sent as a
+    // Bearer token as well. The newer sb_publishable_... keys must NOT be:
+    // Supabase would try to parse the Bearer value as a JWT and reject the
+    // request with "Invalid JWT". Every JWT starts "eyJ", which is a
+    // reliable way to tell them apart.
+    function authHeaders() {
+      const h = { "apikey": SUPABASE_ANON_KEY };
+      if (SUPABASE_ANON_KEY.startsWith("eyJ")) {
+        h["Authorization"] = "Bearer " + SUPABASE_ANON_KEY;
       }
+      return h;
+    }
+
+    async function fetchIP() {
       setLoading();
+      clearInterval(countdownTimer);
+
+      if (SUPABASE_URL.includes("YOUR-PROJECT-REF")) {
+        setError("Portal not configured - set SUPABASE_URL and SUPABASE_ANON_KEY in this page.");
+        return;
+      }
+
       try {
-        const res = await fetch(
-          `https://api.jsonbin.io/v3/b/${BIN_ID}/latest`,
-          { cache: "no-store", headers: API_KEY ? { "X-Access-Key": API_KEY } : {} }
-        );
-        if (!res.ok) throw new Error(`JSONBin returned ${res.status}`);
+        const url = `${SUPABASE_URL}/rest/v1/device_status`
+                  + `?id=eq.1&select=ip,last_seen,uptime_s`;
 
-        const data = await res.json();
-        const record = data.record || {};
-        const ip = record.ip;
-        if (!ip) throw new Error("No IP published yet");
+        const res = await fetch(url, { headers: authHeaders(), cache: "no-store" });
 
-        // The firmware writes uptime_s, not a timestamp - the ESP32 has no
-        // NTP clock. JSONBin's own metadata carries the wall-clock write time.
-        const uptimeS = record.uptime_s;
-        const binTime = data.metadata && data.metadata.createdAt;
+        if (!res.ok) throw new Error(`Database returned ${res.status}`);
+
+        // PostgREST always answers with an array, even for one row.
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) {
+          throw new Error("No device row yet - has the machine ever been switched on?");
+        }
+
+        const { ip, last_seen } = rows[0];
+        if (!ip) throw new Error("The machine hasn't reported an address yet");
 
         currentIP = ip;
-        retryCount = 0;   // success - reset the backoff ladder
-        writeCache(ip, uptimeS, binTime);
-        setReady(ip, uptimeS, binTime, false);
-        if (AUTO_REDIRECT) scheduleRedirect(ip);
-        else document.getElementById("countdown").textContent = "Press Connect to open the breadboard tool";
+
+        const seenAt = last_seen ? new Date(last_seen) : null;
+        const age    = seenAt ? (Date.now() - seenAt.getTime()) : Infinity;
+
+        if (age > STALE_AFTER_MS) {
+          setStale(ip, seenAt, age);      // show it, but don't auto-redirect
+        } else {
+          setReady(ip, seenAt);
+          scheduleRedirect(ip);
+        }
 
       } catch (e) {
         setError(e.message);
       }
     }
 
+    // ---- UI states ----
+
     function setLoading() {
       dot("loading");
-      document.getElementById("status-text").textContent = "Locating machine...";
-      document.getElementById("ip-display").className = "ip-display";
-      document.getElementById("ip-display").textContent = "—";
+      text("status-text", "Looking for the machine...");
+      const el = document.getElementById("ip-display");
+      el.className = "ip-display";
+      el.textContent = "—";
       document.getElementById("connect-btn").disabled = true;
-      document.getElementById("countdown").textContent = "";
+      text("countdown", "");
+      hideNote();
     }
 
-    function setReady(ip, uptimeS, binTime, fromCache) {
+    function setReady(ip, seenAt) {
       dot("ready");
-      document.getElementById("status-text").textContent = "Machine online";
-      document.getElementById("ip-display").textContent = ip;
+      text("status-text", "Machine online");
+      const el = document.getElementById("ip-display");
+      el.className = "ip-display";
+      el.textContent = ip;
       document.getElementById("connect-btn").disabled = false;
-
-      let line = "";
-      if (binTime) {
-        const d = new Date(binTime);
-        const mins = Math.floor((Date.now() - d.getTime()) / 60000);
-        line = mins < 1 ? "IP last changed: just now"
-             : mins < 60 ? `IP last changed: ${mins} min ago`
-             : mins < 1440 ? `IP last changed: ${Math.floor(mins / 60)}h ago`
-             : `IP last changed: ${Math.floor(mins / 1440)} day(s) ago`;
-
-        if (STALE_MINS !== null && mins > STALE_MINS) {
-          line += " (stale?)";
-          document.getElementById("status-text").textContent = "Machine offline?";
-          dot("loading");
-        }
-      }
-      if (uptimeS != null) {
-        const h = Math.floor(uptimeS / 3600);
-        const m = Math.floor((uptimeS % 3600) / 60);
-        line += (line ? " | " : "") + `Board uptime then: ${h}h ${m}m`;
-      }
-      if (fromCache) line += (line ? " | " : "") + "cached";
-      document.getElementById("last-updated").innerHTML =
-        (line || "Last updated: —") +
-        " &middot; <a href='#' onclick='forceRefresh();return false;' " +
-        "style='color:#00ff88;text-decoration:none'>refresh</a>";
+      showLastSeen(seenAt);
+      hideNote();
     }
 
-    function forceRefresh() {
-      try { localStorage.removeItem(CACHE_KEY); } catch {}
-      retryCount = 0;
-      fetchIP(true);
+    function setStale(ip, seenAt, age) {
+      dot("stale");
+      text("status-text", "Machine looks switched off");
+      const el = document.getElementById("ip-display");
+      el.className = "ip-display stale";
+      el.textContent = ip;
+      // Still let them try — it might just have lost WiFi briefly.
+      document.getElementById("connect-btn").disabled = false;
+      text("countdown", "");
+      showLastSeen(seenAt);
+      showNote(
+        `No word from the machine for ${humanAge(age)}. `
+        + `That address was its last known one — you can still try it, `
+        + `but it may not answer.`
+      );
     }
-
-    // Retry with backoff, then stop. A flat 10s retry loop left open in a
-    // browser tab overnight is ~360 requests/hour - it would eat the whole
-    // 10,000/month free quota by morning if the board happens to be off.
-    let retryCount = 0;
-    const RETRY_DELAYS = [10, 30, 60, 120, 300]; // seconds, then give up
 
     function setError(msg) {
       dot("error");
-      document.getElementById("status-text").textContent = "Could not reach machine";
+      text("status-text", "Could not reach the database");
       const el = document.getElementById("ip-display");
       el.className = "ip-display error";
       el.textContent = msg;
       document.getElementById("connect-btn").disabled = true;
-
-      const cd = document.getElementById("countdown");
-
-      if (retryCount >= RETRY_DELAYS.length) {
-        cd.innerHTML = "Gave up - <a href='#' onclick='manualRetry();return false;' "
-                     + "style='color:#00ff88'>retry</a>";
-        return;
-      }
-
-      let secs = RETRY_DELAYS[retryCount++];
+      text("countdown", "Retrying in 10s...");
+      hideNote();
       clearInterval(countdownTimer);
-      const tick = () => {
-        if (secs <= 0) {
-          clearInterval(countdownTimer);
-          fetchIP(true);
-          return;
-        }
-        cd.textContent = `Retrying in ${secs}s...`;
-        secs--;
-      };
-      tick();
-      countdownTimer = setInterval(tick, 1000);
+      setTimeout(fetchIP, 10000);
     }
 
-    function manualRetry() {
-      retryCount = 0;
-      fetchIP(true);
-    }
+    // ---- helpers ----
 
     function dot(state) {
       const el = document.getElementById("dot");
       el.className = "dot";
-      if (state === "error") el.classList.add("error");
-      if (state === "loading") el.classList.add("loading");
-      // "ready" = green pulse (default)
+      if (state !== "ready") el.classList.add(state);
+    }
+
+    function text(id, value) {
+      document.getElementById(id).textContent = value;
+    }
+
+    function showNote(msg) {
+      const el = document.getElementById("note");
+      el.textContent = msg;
+      el.style.display = "block";
+    }
+
+    function hideNote() {
+      document.getElementById("note").style.display = "none";
+    }
+
+    function showLastSeen(seenAt) {
+      text("last-updated",
+           seenAt ? "Last seen: " + seenAt.toLocaleString() : "Last seen: unknown");
+    }
+
+    function humanAge(ms) {
+      const mins = Math.floor(ms / 60000);
+      if (mins < 60)   return `${mins} minute${mins === 1 ? "" : "s"}`;
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24)    return `${hrs} hour${hrs === 1 ? "" : "s"}`;
+      const days = Math.floor(hrs / 24);
+      return `${days} day${days === 1 ? "" : "s"}`;
     }
 
     function scheduleRedirect(ip) {
       let secs = 3;
-      document.getElementById("countdown").textContent = `Redirecting in ${secs}s...`;
+      text("countdown", `Redirecting in ${secs}s...`);
       clearInterval(countdownTimer);
       countdownTimer = setInterval(() => {
         secs--;
         if (secs <= 0) {
           clearInterval(countdownTimer);
-          document.getElementById("countdown").textContent = "Connecting...";
-          window.location.href = `http://${ip}${ESP32_PATH}`;
+          text("countdown", "Connecting...");
+          go(ip);
         } else {
-          document.getElementById("countdown").textContent = `Redirecting in ${secs}s...`;
+          text("countdown", `Redirecting in ${secs}s...`);
         }
       }, 1000);
     }
@@ -336,11 +356,15 @@
     function connectNow() {
       if (currentIP) {
         clearInterval(countdownTimer);
-        window.location.href = `http://${currentIP}${ESP32_PATH}`;
+        go(currentIP);
       }
     }
 
-    fetchIP(false);
+    function go(ip) {
+      window.location.href = `http://${ip}${ESP32_PATH}`;
+    }
+
+    fetchIP();
   </script>
 </body>
 </html>
