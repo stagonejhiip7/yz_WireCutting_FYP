@@ -8,12 +8,11 @@
   Admin page for the wire cutting & stripping machine.
   Static file - host it on GitHub Pages next to index.html (the portal).
 
-  Sign-in is Supabase Auth (email + password). Data is protected by the
-  row-level security in supabase_schema.sql: only emails in the `admins`
-  table can read anything. See "ADMIN PAGE + ACCESS LIST" in that file for
-  the one-time setup.
+  Login: admin / admin by default. The username and password are checked
+  by the database (admin_login table in supabase_schema.sql), not by this
+  page. Change the password there:
+    update admin_login set password = 'new-password' where username = 'admin';
 -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root {
     --bg: #0f1117; --card: #1a1d27; --card2: #151821; --border: #2a2d3a;
@@ -138,7 +137,7 @@
     <form id="login-form">
       <div class="field">
         <label for="l-email">Username</label>
-        <input class="input" id="l-email" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+        <input class="input" id="l-email" type="text" value="admin" autocomplete="username" autocapitalize="off" spellcheck="false" required>
       </div>
       <div class="field">
         <label for="l-pass">Password</label>
@@ -247,8 +246,6 @@
 <script>
 // ── CONFIG ─────────────────────────────────────────────────────────────
 // Same public values as index.html (Supabase: Settings -> API Keys).
-// Public on purpose: the data is protected by row-level security, not by
-// hiding this key.
 const SUPABASE_URL      = "https://kkcafoottgitdemorykh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_6BjS43xIvQU4EODO4fmMig_9s29zwyt";
 
@@ -257,17 +254,6 @@ const SUPABASE_ANON_KEY = "sb_publishable_6BjS43xIvQU4EODO4fmMig_9s29zwyt";
 const SPOOL_FULL_G = 500;
 const SPOOL_LOW_G  = 50;
 const STALE_AFTER_MS = 15 * 60 * 1000;   // machine republishes every 10 min
-
-// Login. Supabase Auth wants an email and a password of 6+ characters,
-// so the page turns username "admin" / password "admin" into
-//   email:    admin@example.com
-//   password: admin-wirecutter
-// Create exactly that user in Supabase (see supabase_schema.sql).
-// Typing a full email address still works as-is.
-const USERNAME_DOMAIN = "example.com";
-const PASSWORD_SUFFIX = "-wirecutter";
-const toEmail = u => u.includes("@") ? u : `${u.toLowerCase()}@${USERNAME_DOMAIN}`;
-const toUser  = e => e.endsWith("@" + USERNAME_DOMAIN) ? e.slice(0, -USERNAME_DOMAIN.length - 1) : e;
 const TZ = "Asia/Kuala_Lumpur";
 // ───────────────────────────────────────────────────────────────────────
 
@@ -278,7 +264,6 @@ const SPOOLS = [
   { key: "blue",   name: "Blue",   color: "#3b82f6" },
 ];
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -287,7 +272,7 @@ const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 // Timestamps: timestamptz -> Malaysia time. The views' *_myt columns are
 // already Malaysia wall-clock time (no zone), so show those as they are.
 const fmtTz  = t => t ? new Date(t).toLocaleString("en-GB", { timeZone: TZ, dateStyle: "medium", timeStyle: "short" }) : "—";
-const fmtMyt = t => t ? new Date(t.replace(" ", "T")).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "—";
+const fmtMyt = t => t ? new Date(String(t).replace(" ", "T")).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "—";
 const fmtDay = d => new Date(d + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const todayMyt = () => new Date().toLocaleDateString("en-CA", { timeZone: TZ });   // YYYY-MM-DD
 const num = (v, dp = 0) => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(dp);
@@ -310,44 +295,55 @@ function downloadCsv(name, rows) {
   URL.revokeObjectURL(a.href);
 }
 
-// ═════════ Auth ═════════
-$("login-form").addEventListener("submit", async e => {
-  e.preventDefault();
-  $("l-btn").disabled = true;
-  $("l-msg").className = "msg"; $("l-msg").textContent = "Signing in…";
-  const { error } = await sb.auth.signInWithPassword({
-    email: toEmail($("l-email").value.trim()), password: $("l-pass").value + PASSWORD_SUFFIX,
+// ═════════ Talking to Supabase ═════════
+// Every admin call is a database function that checks the username and
+// password first (admin_login table in supabase_schema.sql).
+let login = null;   // { user, pass }
+
+async function rpc(fn, args = {}) {
+  const h = { "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+  if (SUPABASE_ANON_KEY.startsWith("eyJ")) h["Authorization"] = "Bearer " + SUPABASE_ANON_KEY;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST", headers: h, cache: "no-store",
+    body: JSON.stringify(Object.assign({ p_user: login.user, p_pass: login.pass }, args)),
   });
-  if (error && /invalid login/i.test(error.message)) error.message = "Wrong username or password.";
-  $("l-btn").disabled = false;
-  if (error) { $("l-msg").className = "msg bad"; $("l-msg").textContent = error.message; return; }
-  enter();
-});
-
-$("logout-btn").onclick = async () => { await sb.auth.signOut(); location.reload(); };
-
-async function enter() {
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) { showLogin(); return; }
-
-  const { data: isAdmin, error } = await sb.rpc("is_admin");
-  if (error || !isAdmin) {
-    await sb.auth.signOut();
-    showLogin(error
-      ? "Couldn't check admin rights - has supabase_schema.sql been run? (" + error.message + ")"
-      : `${toUser(session.user.email)} isn't an admin. Add ${session.user.email} to the admins table.`);
-    return;
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = body && body.message ? body.message : `HTTP ${res.status}`;
+    if (res.status === 404) throw new Error("Admin functions not found - run supabase_schema.sql in Supabase first.");
+    throw new Error(msg);
   }
-  $("who").textContent = "Signed in as " + toUser(session.user.email);
-  $("login").style.display = "none";
-  $("app").style.display = "block";
-  loadAll();
+  return body;
 }
 
+// ═════════ Login ═════════
+$("login-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  login = { user: $("l-email").value.trim(), pass: $("l-pass").value };
+  $("l-btn").disabled = true;
+  $("l-msg").className = "msg"; $("l-msg").textContent = "Signing in…";
+  const ok = await loadAll(true);
+  $("l-btn").disabled = false;
+  if (ok) {
+    try { sessionStorage.setItem("admin-login", JSON.stringify(login)); } catch (e) {}
+  }
+});
+
+$("logout-btn").onclick = () => {
+  try { sessionStorage.removeItem("admin-login"); } catch (e) {}
+  location.reload();
+};
+
+function showApp() {
+  $("who").textContent = "Signed in as " + login.user;
+  $("login").style.display = "none";
+  $("app").style.display = "block";
+}
 function showLogin(msg) {
   $("app").style.display = "none";
   $("login").style.display = "";
-  if (msg) { $("l-msg").className = "msg bad"; $("l-msg").textContent = msg; }
+  $("l-msg").className = msg ? "msg bad" : "msg";
+  $("l-msg").textContent = msg || "";
 }
 
 // ═════════ Tabs ═════════
@@ -363,45 +359,59 @@ try {
 
 $("refresh-btn").onclick = () => loadAll();
 
-function loadAll() {
-  loadStatus(); loadDaily(); loadFaults(); loadUsage(); loadAccess(); loadJobs();
+// ═════════ Load everything ═════════
+let usageRows = [], accessRows = [];
+
+async function loadAll(fromLogin) {
+  let d;
+  try {
+    d = await rpc("admin_get");
+  } catch (e) {
+    if (fromLogin || /password/i.test(e.message)) showLogin(e.message);
+    else alertBar(e.message);
+    return false;
+  }
+  showApp();
+  renderStatus(d.status);
+  renderDaily(d.daily || []);
+  usageRows = d.usage || [];  renderUsage();
+  accessRows = d.access || []; renderAccess();
+  renderFaults(d.faults || []);
+  renderJobs(d.jobs || []);
+  return true;
 }
+function alertBar(msg) { $("machine-text").textContent = "⚠️ " + msg; }
 
 // ═════════ Machine + spools ═════════
-async function loadStatus() {
-  const { data, error } = await sb.from("device_status")
-    .select("ip,last_seen,yellow_g,red_g,black_g,blue_g,spools_at").eq("id", 1).maybeSingle();
-  if (error || !data) {
+function renderStatus(s) {
+  if (!s) {
     $("machine-text").textContent = "Machine: unknown";
-    $("spools").innerHTML = `<div class="hint">${esc(error ? error.message : "No status row yet.")}</div>`;
+    $("spools").innerHTML = '<div class="hint">No status from the machine yet.</div>';
     return;
   }
-  const age = data.last_seen ? Date.now() - new Date(data.last_seen).getTime() : Infinity;
+  const age = s.last_seen ? Date.now() - new Date(s.last_seen).getTime() : Infinity;
   const on = age < STALE_AFTER_MS;
   $("machine-dot").className = "dot " + (on ? "on" : "off");
   $("machine-text").innerHTML = on
-    ? `Machine online · <span class="mono">${esc(data.ip || "—")}</span>`
-    : `Machine offline · last seen ${esc(fmtTz(data.last_seen))}`;
+    ? `Machine online · <span class="mono">${esc(s.ip || "—")}</span>`
+    : `Machine offline · last seen ${esc(fmtTz(s.last_seen))}`;
 
-  $("spools").innerHTML = SPOOLS.map(s => {
-    const g = data[s.key + "_g"];
+  $("spools").innerHTML = SPOOLS.map(sp => {
+    const g = s[sp.key + "_g"];
     const known = typeof g === "number";
     const pct = known ? Math.max(0, Math.min(100, g / SPOOL_FULL_G * 100)) : 0;
     const low = known && g < SPOOL_LOW_G;
     return `<div class="spool${low ? " low" : ""}">
-      <div class="spool-bar"><div class="spool-fill" style="height:${pct}%;background:${low ? "var(--red)" : s.color}"></div></div>
-      <div class="spool-name">${s.name}${low ? " · LOW" : ""}</div>
+      <div class="spool-bar"><div class="spool-fill" style="height:${pct}%;background:${low ? "var(--red)" : sp.color}"></div></div>
+      <div class="spool-name">${sp.name}${low ? " · LOW" : ""}</div>
       <div class="spool-g">${known ? Math.round(g) + " g" : "—"}</div>
     </div>`;
   }).join("");
-  $("spool-time").textContent = data.spools_at ? "Weighed " + fmtTz(data.spools_at) : "No reading from the machine yet";
+  $("spool-time").textContent = s.spools_at ? "Weighed " + fmtTz(s.spools_at) : "No reading from the machine yet";
 }
 
 // ═════════ Daily use ═════════
-async function loadDaily() {
-  const { data, error } = await sb.from("daily_consumption")
-    .select("day_myt,sessions,wires_cut,wire_m").order("day_myt", { ascending: false }).limit(14);
-  const rows = data || [];
+function renderDaily(rows) {
   const today = rows.find(r => r.day_myt === todayMyt());
   $("s-jobs").textContent   = today ? today.sessions : 0;
   $("s-wires").textContent  = today ? today.wires_cut : 0;
@@ -410,18 +420,11 @@ async function loadDaily() {
     [{ label: "Day" }, { label: "Jobs", num: 1 }, { label: "Wires", num: 1 }, { label: "Length (m)", num: 1 }],
     rows.map(r => `<tr><td>${fmtDay(r.day_myt)}</td><td class="num">${r.sessions}</td>
       <td class="num">${r.wires_cut ?? 0}</td><td class="num">${num(r.wire_m, 2)}</td></tr>`),
-    error ? esc(error.message) : "No jobs yet.");
+    "No jobs yet.");
 }
 
 // ═════════ Usage by student ═════════
-let usageRows = [];
-async function loadUsage() {
-  const { data, error } = await sb.from("usage_by_student")
-    .select("email,sessions,total_wires,total_wire_m,last_used_myt").order("total_wire_m", { ascending: false });
-  usageRows = data || [];
-  renderUsage(error);
-}
-function renderUsage(error) {
+function renderUsage() {
   const q = $("usage-search").value.trim().toLowerCase();
   const rows = usageRows.filter(r => !q || (r.email || "").includes(q));
   table($("usage-table"),
@@ -430,7 +433,7 @@ function renderUsage(error) {
       <td>${r.email ? esc(r.email) : '<span class="muted">(no email in file)</span>'}</td>
       <td class="num">${r.sessions}</td><td class="num">${r.total_wires}</td>
       <td class="num">${num(r.total_wire_m, 2)}</td><td class="muted">${esc(fmtMyt(r.last_used_myt))}</td></tr>`),
-    error ? esc(error.message) : (q ? "No match." : "Nobody has used the machine yet."));
+    q ? "No match." : "Nobody has used the machine yet.");
 }
 $("usage-search").oninput = () => renderUsage();
 $("usage-dl").onclick = () => downloadCsv("wire_usage_by_student.csv",
@@ -438,13 +441,7 @@ $("usage-dl").onclick = () => downloadCsv("wire_usage_by_student.csv",
    ...usageRows.map(r => [r.email || "", r.sessions, r.total_wires, r.total_wire_m, r.last_used_myt])]);
 
 // ═════════ Access list ═════════
-let accessRows = [];
-async function loadAccess() {
-  const { data, error } = await sb.from("allowed_students").select("email,added_at").order("email");
-  accessRows = data || [];
-  renderAccess(error);
-}
-function renderAccess(error) {
+function renderAccess() {
   const n = accessRows.length;
   $("access-count").textContent = n ? `(${n})` : "";
   $("access-banner").innerHTML = n
@@ -456,7 +453,7 @@ function renderAccess(error) {
     [{ label: "Email" }, { label: "Added" }, { label: "" }],
     rows.map(r => `<tr><td class="mono">${esc(r.email)}</td><td class="muted">${esc(fmtTz(r.added_at))}</td>
       <td class="num"><button class="btn small danger" data-remove="${esc(r.email)}">Remove</button></td></tr>`),
-    error ? esc(error.message) : (q ? "No match." : "No students on the list."));
+    q ? "No match." : "No students on the list.");
 }
 $("access-search").oninput = () => renderAccess();
 
@@ -465,19 +462,16 @@ function accessMsg(cls, text) { const m = $("access-msg"); m.className = "msg " 
 async function addEmails(text) {
   const emails = [...new Set((text.match(EMAIL_RE) || []).map(e => e.toLowerCase()))];
   if (!emails.length) { accessMsg("warn", "No email addresses found."); return; }
-  const before = new Set(accessRows.map(r => r.email));
-  const fresh = emails.filter(e => !before.has(e));
-  if (!fresh.length) { accessMsg("warn", `All ${emails.length} already on the list.`); return; }
   $("access-add").disabled = true;
   accessMsg("", "Adding…");
-  const { error } = await sb.from("allowed_students")
-    .upsert(fresh.map(email => ({ email })), { onConflict: "email", ignoreDuplicates: true });
+  try {
+    const added = await rpc("admin_access_add", { p_emails: emails });
+    const skipped = emails.length - added;
+    accessMsg("ok", `Added ${added}` + (skipped ? ` (${skipped} already on the list)` : "") + ".");
+    $("access-input").value = "";
+    await loadAll();
+  } catch (e) { accessMsg("bad", e.message); }
   $("access-add").disabled = false;
-  if (error) { accessMsg("bad", error.message); return; }
-  const skipped = emails.length - fresh.length;
-  accessMsg("ok", `Added ${fresh.length}` + (skipped ? ` (${skipped} already on the list)` : "") + ".");
-  $("access-input").value = "";
-  loadAccess();
 }
 $("access-add").onclick = () => addEmails($("access-input").value);
 $("access-file").onchange = async e => {
@@ -489,28 +483,27 @@ $("access-file").onchange = async e => {
 $("access-table").addEventListener("click", async e => {
   const email = e.target.dataset?.remove; if (!email) return;
   if (!confirm(`Remove ${email} from the access list?`)) return;
-  const { error } = await sb.from("allowed_students").delete().eq("email", email);
-  if (error) { accessMsg("bad", error.message); return; }
-  accessMsg("ok", `Removed ${email}.`);
-  loadAccess();
+  try {
+    await rpc("admin_access_remove", { p_email: email });
+    accessMsg("ok", `Removed ${email}.`);
+    await loadAll();
+  } catch (err) { accessMsg("bad", err.message); }
 });
 
 $("access-clear").onclick = async () => {
   if (!accessRows.length) return;
   if (!confirm(`Remove all ${accessRows.length} students? The list will be empty, which lets EVERY student use the machine.`)) return;
-  const { error } = await sb.from("allowed_students").delete().neq("email", "");
-  if (error) { accessMsg("bad", error.message); return; }
-  accessMsg("ok", "List cleared.");
-  loadAccess();
+  try {
+    await rpc("admin_access_remove", { p_email: null });
+    accessMsg("ok", "List cleared.");
+    await loadAll();
+  } catch (e) { accessMsg("bad", e.message); }
 };
 $("access-dl").onclick = () => downloadCsv("allowed_students.csv",
   [["email", "added_at"], ...accessRows.map(r => [r.email, r.added_at])]);
 
 // ═════════ Faults ═════════
-async function loadFaults() {
-  const { data, error } = await sb.from("faults")
-    .select("occurred_at,reason,email,card_uid").order("occurred_at", { ascending: false }).limit(100);
-  const rows = data || [];
+function renderFaults(rows) {
   const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
   const recent = rows.filter(r => new Date(r.occurred_at).getTime() >= weekAgo).length;
   $("s-faults").textContent = recent;
@@ -522,28 +515,26 @@ async function loadFaults() {
       <td class="reason">${esc(r.reason)}</td>
       <td>${r.email ? esc(r.email) : '<span class="muted">—</span>'}</td>
       <td class="mono muted">${esc(r.card_uid || "—")}</td></tr>`),
-    error ? esc(error.message) : "No faults logged. 🎉");
+    "No faults logged. 🎉");
 }
 
 // ═════════ Recent jobs ═════════
-async function loadJobs() {
-  const { data, error } = await sb.from("recent_sessions")
-    .select("when_myt,who,csv_file,wires_cut,wire_cm,duration_s").limit(100);
+function renderJobs(rows) {
   table($("jobs-table"),
     [{ label: "When" }, { label: "Student" }, { label: "File" }, { label: "Wires", num: 1 }, { label: "Length (m)", num: 1 }, { label: "Time", num: 1 }],
-    (data || []).map(r => `<tr><td class="muted" style="white-space:nowrap">${esc(fmtMyt(r.when_myt))}</td>
+    rows.map(r => `<tr><td class="muted" style="white-space:nowrap">${esc(fmtMyt(r.when_myt))}</td>
       <td>${esc(r.who)}</td><td class="mono">${esc(r.csv_file || "—")}</td>
       <td class="num">${r.wires_cut}</td><td class="num">${r.wire_cm == null ? "—" : num(r.wire_cm / 100, 2)}</td>
       <td class="num">${r.duration_s == null ? "—" : Math.round(r.duration_s) + " s"}</td></tr>`),
-    error ? esc(error.message) : "No jobs yet.");
+    "No jobs yet.");
 }
 
 // ═════════ Start ═════════
-if (SUPABASE_URL.includes("YOUR-PROJECT-REF")) {
-  showLogin("Set SUPABASE_URL and SUPABASE_ANON_KEY at the top of this file.");
-} else {
-  enter();
-}
+// Stay signed in while this tab is open.
+try {
+  const saved = JSON.parse(sessionStorage.getItem("admin-login") || "null");
+  if (saved) { login = saved; loadAll(true); }
+} catch (e) {}
 </script>
 </body>
 </html>
