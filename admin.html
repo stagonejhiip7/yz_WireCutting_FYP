@@ -101,6 +101,7 @@
   .spool-fill { width: 100%; transition: height .4s; }
   .spool-name { font-size: 12px; color: var(--sub); font-weight: 600; }
   .spool-g { font-size: 18px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .spool-sub { font-size: 12px; color: var(--sub); margin-top: 2px; font-variant-numeric: tabular-nums; }
   .spool.low { border-color: #5a2228; }
   .spool.low .spool-g, .spool.low .spool-name { color: var(--red); }
 
@@ -180,6 +181,12 @@
     <div class="card">
       <div class="card-head"><h2>Wire left on spools</h2><span class="spacer"></span><span class="hint" id="spool-time"></span></div>
       <div class="spools" id="spools"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Machine SD card</h2><span class="spacer"></span><span class="hint" id="sd-wipe-status"></span></div>
+      <p class="hint" style="margin:0 0 12px">Deletes every job file (.csv) on the machine's SD card. The machine does it the next time it is idle and online (it checks every 30 s). Requests expire after 1 hour.</p>
+      <button class="btn danger" id="sd-wipe-btn">🗑 Delete all SD files</button>
     </div>
 
     <div class="card">
@@ -270,10 +277,11 @@
 const SUPABASE_URL      = "https://kkcafoottgitdemorykh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_6BjS43xIvQU4EODO4fmMig_9s29zwyt";
 
-// Spool bars: FULL = reading of a full spool (top of the bar).
-// LOW = shown red below this - keep in step with SPOOL_LOW_G in display.cpp.
-const SPOOL_FULL_G = 500;
-const SPOOL_LOW_G  = 50;
+// Spool bars show % wire left: 0% = empty plastic reel, 100% = full spool.
+// Keep in step with SPOOL_EMPTY_G / SPOOL_FULL_G / SPOOL_LOW_PCT in display.cpp.
+const SPOOL_EMPTY_G = 44.7;   // empty reel, no wire
+const SPOOL_FULL_G  = 375;    // full spool (reel + wire)
+const SPOOL_LOW_PCT = 10;     // shown red below this
 const STALE_AFTER_MS = 15 * 60 * 1000;   // machine republishes every 10 min
 const TZ = "Asia/Kuala_Lumpur";
 // ───────────────────────────────────────────────────────────────────────
@@ -380,6 +388,33 @@ try {
 
 $("refresh-btn").onclick = () => loadAll();
 
+// ═════════ SD card wipe ═════════
+// Goes through Supabase (admin_sd_wipe); the machine picks it up while idle.
+let sdWipePoll = null;
+const SD_WIPE_EXPIRE_MS = 60 * 60 * 1000;   // keep in step with machine_sd_wipe_pending()
+
+// Shows the last request's state. Returns true while still waiting.
+function renderSdWipe(w) {
+  const el = $("sd-wipe-status");
+  if (!w || !w.sd_wipe_req) { el.textContent = ""; return false; }
+  const done = w.sd_wipe_done && w.sd_wipe_done === w.sd_wipe_req;
+  const expired = Date.now() - new Date(w.sd_wipe_req).getTime() > SD_WIPE_EXPIRE_MS;
+  if (done)         el.textContent = `Last wiped ${fmtTz(w.sd_wipe_req)} · ${w.sd_wipe_count ?? 0} file(s) deleted`;
+  else if (expired) el.textContent = `Request from ${fmtTz(w.sd_wipe_req)} expired - machine was offline or busy`;
+  else              el.textContent = "⏳ Waiting for the machine…";
+  return !done && !expired;
+}
+
+$("sd-wipe-btn").onclick = async () => {
+  if (!confirm("Delete ALL job files on the machine's SD card?\nThis can't be undone.")) return;
+  $("sd-wipe-btn").disabled = true;
+  try {
+    await rpc("admin_sd_wipe");
+    await loadAll();
+  } catch (e) { alertBar(e.message); }
+  $("sd-wipe-btn").disabled = false;
+};
+
 // ═════════ Load everything ═════════
 let usageRows = [], accessRows = [], adminEmailRows = [];
 
@@ -400,6 +435,8 @@ async function loadAll(fromLogin) {
   adminEmailRows = d.admin_emails || []; renderAdminEmails();
   renderFaults(d.faults || []);
   renderJobs(d.jobs || []);
+  clearTimeout(sdWipePoll);
+  if (renderSdWipe(d.sd_wipe)) sdWipePoll = setTimeout(() => loadAll(), 10000);   // refresh until the machine confirms
   return true;
 }
 function alertBar(msg) { $("machine-text").textContent = "⚠️ " + msg; }
@@ -421,12 +458,14 @@ function renderStatus(s) {
   $("spools").innerHTML = SPOOLS.map(sp => {
     const g = s[sp.key + "_g"];
     const known = typeof g === "number";
-    const pct = known ? Math.max(0, Math.min(100, g / SPOOL_FULL_G * 100)) : 0;
-    const low = known && g < SPOOL_LOW_G;
+    const wire = known ? Math.max(0, g - SPOOL_EMPTY_G) : 0;   // grams of wire left
+    const pct = known ? Math.min(100, wire / (SPOOL_FULL_G - SPOOL_EMPTY_G) * 100) : 0;
+    const low = known && pct < SPOOL_LOW_PCT;
     return `<div class="spool${low ? " low" : ""}">
       <div class="spool-bar"><div class="spool-fill" style="height:${pct}%;background:${low ? "var(--red)" : sp.color}"></div></div>
       <div class="spool-name">${sp.name}${low ? " · LOW" : ""}</div>
-      <div class="spool-g">${known ? Math.round(g) + " g" : "—"}</div>
+      <div class="spool-g">${known ? Math.round(pct) + "%" : "—"}</div>
+      <div class="spool-sub">${known ? Math.round(wire) + " g wire" : ""}</div>
     </div>`;
   }).join("");
   $("spool-time").textContent = s.spools_at ? "Weighed " + fmtTz(s.spools_at) : "No reading from the machine yet";
