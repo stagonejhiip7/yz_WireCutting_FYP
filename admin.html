@@ -210,19 +210,40 @@
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="access-add">＋ Add emails</button>
         <label class="btn" for="access-file">📄 Upload CSV / TXT</label>
+        <button class="btn" id="access-template">⬇ Student template</button>
         <input type="file" id="access-file" accept=".csv,.txt,text/csv,text/plain" style="display:none">
         <span class="msg" id="access-msg" style="margin-top:0"></span>
       </div>
+      <p class="hint" style="margin-top:10px">
+        Easiest: download the student template, fill it in with Excel (one student per row), save as CSV, then upload it.
+        <strong>allowed_students.csv</strong> uses the same columns (name, student_id, email), so you can download it,
+        edit it and upload it again. Only the email decides who can use the machine. You can also paste rows straight
+        from Excel, or any list of emails.
+      </p>
     </div>
 
     <div class="card">
       <div class="card-head">
         <h2>Allowed students</h2><span class="spacer"></span>
-        <input class="input search" id="access-search" placeholder="Search email…">
-        <button class="btn small" id="access-dl">⬇ CSV</button>
+        <input class="input search" id="access-search" placeholder="Search name, ID or email…">
+        <button class="btn small" id="access-dl">⬇ allowed_students.csv</button>
         <button class="btn small danger" id="access-clear">Remove all</button>
       </div>
       <div class="table-wrap"><table id="access-table"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Admin emails</h2>
+      <p class="hint" style="margin-bottom:12px">
+        Always allowed to use the machine — e.g. you and your lecturer — even when they're not on the student list.
+        "Remove all" above doesn't touch these.
+      </p>
+      <div class="row">
+        <input class="input" id="admin-email-input" placeholder="name@monash.edu" style="max-width:320px">
+        <button class="btn primary" id="admin-email-add">＋ Add</button>
+        <span class="msg" id="admin-email-msg" style="margin-top:0"></span>
+      </div>
+      <div class="table-wrap" style="margin-top:12px"><table id="admin-email-table"></table></div>
     </div>
   </section>
 
@@ -360,7 +381,7 @@ try {
 $("refresh-btn").onclick = () => loadAll();
 
 // ═════════ Load everything ═════════
-let usageRows = [], accessRows = [];
+let usageRows = [], accessRows = [], adminEmailRows = [];
 
 async function loadAll(fromLogin) {
   let d;
@@ -376,6 +397,7 @@ async function loadAll(fromLogin) {
   renderDaily(d.daily || []);
   usageRows = d.usage || [];  renderUsage();
   accessRows = d.access || []; renderAccess();
+  adminEmailRows = d.admin_emails || []; renderAdminEmails();
   renderFaults(d.faults || []);
   renderJobs(d.jobs || []);
   return true;
@@ -445,13 +467,16 @@ function renderAccess() {
   const n = accessRows.length;
   $("access-count").textContent = n ? `(${n})` : "";
   $("access-banner").innerHTML = n
-    ? `<div class="banner closed">🔒 Only the ${n} student${n === 1 ? "" : "s"} below can use the machine. Everyone else is blocked on the upload page and at the machine.</div>`
+    ? `<div class="banner closed">🔒 Only the ${n} student${n === 1 ? "" : "s"} below (plus the admin emails) can use the machine. Everyone else is blocked on the upload page and at the machine.</div>`
     : `<div class="banner open">🔓 The list is empty, so <strong>every</strong> student can use the machine. Add emails to restrict it.</div>`;
   const q = $("access-search").value.trim().toLowerCase();
-  const rows = accessRows.filter(r => !q || r.email.includes(q));
+  const rows = accessRows.filter(r => !q ||
+    [r.email, r.name, r.student_id].some(v => (v || "").toLowerCase().includes(q)));
   table($("access-table"),
-    [{ label: "Email" }, { label: "Added" }, { label: "" }],
-    rows.map(r => `<tr><td class="mono">${esc(r.email)}</td><td class="muted">${esc(fmtTz(r.added_at))}</td>
+    [{ label: "Name" }, { label: "Student ID" }, { label: "Email" }, { label: "Added" }, { label: "" }],
+    rows.map(r => `<tr><td>${r.name ? esc(r.name) : '<span class="muted">—</span>'}</td>
+      <td class="mono">${r.student_id ? esc(r.student_id) : '<span class="muted">—</span>'}</td>
+      <td class="mono">${esc(r.email)}</td><td class="muted">${esc(fmtTz(r.added_at))}</td>
       <td class="num"><button class="btn small danger" data-remove="${esc(r.email)}">Remove</button></td></tr>`),
     q ? "No match." : "No students on the list.");
 }
@@ -459,15 +484,75 @@ $("access-search").oninput = () => renderAccess();
 
 function accessMsg(cls, text) { const m = $("access-msg"); m.className = "msg " + cls; m.textContent = text; }
 
+// Same columns for the template, the download and the upload.
+const STUDENT_COLS = ["name", "student_id", "email"];
+
+// Splits one CSV / Excel-paste line into cells (handles "quoted, cells").
+function splitLine(line) {
+  if (line.includes("\t")) return line.split("\t").map(c => c.trim());
+  const out = []; let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQ = false;
+      else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === "," || ch === ";") { out.push(cur.trim()); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+// Reads the template format (name, student_id, email - any order, header
+// row optional). Lines without a header fall back to "find the email in
+// the line, the other cells are name then ID".
+function parseStudents(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
+  let col = null;
+  const rows = [];
+  for (const line of lines) {
+    const cells = splitLine(line);
+    const lower = cells.map(c => c.toLowerCase().replace(/[\s_]+/g, ""));
+    if (!col && lower.includes("email")) {         // header row
+      col = {
+        email: lower.indexOf("email"),
+        name: lower.findIndex(c => c === "name" || c === "studentname" || c === "fullname"),
+        id: lower.findIndex(c => c === "studentid" || c === "id" || c === "studentno" || c === "studentnumber"),
+      };
+      continue;
+    }
+    let email, name = "", id = "";
+    if (col) {
+      email = (cells[col.email] || "").match(EMAIL_RE)?.[0];
+      name = col.name >= 0 ? cells[col.name] || "" : "";
+      id   = col.id   >= 0 ? cells[col.id]   || "" : "";
+    } else {
+      // No header: every email on the line; if it's one row, take the
+      // other cells as name + ID.
+      const found = line.match(EMAIL_RE) || [];
+      if (found.length !== 1) { found.forEach(e => rows.push({ email: e.toLowerCase() })); continue; }
+      email = found[0];
+      const rest = cells.filter(c => !c.includes("@"));
+      name = rest.find(c => /[a-z]/i.test(c)) || "";
+      id   = rest.find(c => /^\d{5,}$/.test(c)) || "";
+    }
+    if (email) rows.push({ name, student_id: id, email: email.toLowerCase() });
+  }
+  return rows;
+}
+
 async function addEmails(text) {
-  const emails = [...new Set((text.match(EMAIL_RE) || []).map(e => e.toLowerCase()))];
-  if (!emails.length) { accessMsg("warn", "No email addresses found."); return; }
+  const rows = parseStudents(text);
+  if (!rows.length) { accessMsg("warn", "No email addresses found."); return; }
   $("access-add").disabled = true;
   accessMsg("", "Adding…");
   try {
-    const added = await rpc("admin_access_add", { p_emails: emails });
-    const skipped = emails.length - added;
-    accessMsg("ok", `Added ${added}` + (skipped ? ` (${skipped} already on the list)` : "") + ".");
+    const added = await rpc("admin_students_add", { p_rows: rows });
+    const unique = new Set(rows.map(r => r.email)).size;
+    const skipped = unique - added;
+    accessMsg("ok", `Added ${added}` + (skipped ? ` (${skipped} already on the list - names/IDs updated)` : "") + ".");
     $("access-input").value = "";
     await loadAll();
   } catch (e) { accessMsg("bad", e.message); }
@@ -499,8 +584,45 @@ $("access-clear").onclick = async () => {
     await loadAll();
   } catch (e) { accessMsg("bad", e.message); }
 };
+$("access-template").onclick = () => downloadCsv("student_template.csv", [
+  STUDENT_COLS,
+  ["Example Student", "12345678", "exam0001@student.monash.edu"],
+  ["Another Student", "87654321", "anot0002@student.monash.edu"],
+]);
 $("access-dl").onclick = () => downloadCsv("allowed_students.csv",
-  [["email", "added_at"], ...accessRows.map(r => [r.email, r.added_at])]);
+  [STUDENT_COLS, ...accessRows.map(r => [r.name || "", r.student_id || "", r.email])]);
+
+// ═════════ Admin emails ═════════
+function renderAdminEmails() {
+  table($("admin-email-table"),
+    [{ label: "Email" }, { label: "Added" }, { label: "" }],
+    adminEmailRows.map(r => `<tr><td class="mono">${esc(r.email)}</td><td class="muted">${esc(fmtTz(r.added_at))}</td>
+      <td class="num"><button class="btn small danger" data-remove-admin="${esc(r.email)}">Remove</button></td></tr>`),
+    "No admin emails yet.");
+}
+function adminEmailMsg(cls, text) { const m = $("admin-email-msg"); m.className = "msg " + cls; m.textContent = text; }
+
+$("admin-email-add").onclick = async () => {
+  const emails = [...new Set(($("admin-email-input").value.match(EMAIL_RE) || []).map(e => e.toLowerCase()))];
+  if (!emails.length) { adminEmailMsg("warn", "Type an email address first."); return; }
+  try {
+    const added = await rpc("admin_access_add", { p_emails: emails, p_list: "admins" });
+    adminEmailMsg("ok", added ? `Added ${emails.join(", ")}.` : "Already on the list.");
+    $("admin-email-input").value = "";
+    await loadAll();
+  } catch (e) { adminEmailMsg("bad", e.message); }
+};
+$("admin-email-input").addEventListener("keydown", e => { if (e.key === "Enter") $("admin-email-add").click(); });
+
+$("admin-email-table").addEventListener("click", async e => {
+  const email = e.target.dataset?.removeAdmin; if (!email) return;
+  if (!confirm(`Remove admin email ${email}?`)) return;
+  try {
+    await rpc("admin_access_remove", { p_email: email, p_list: "admins" });
+    adminEmailMsg("ok", `Removed ${email}.`);
+    await loadAll();
+  } catch (err) { adminEmailMsg("bad", err.message); }
+});
 
 // ═════════ Faults ═════════
 function renderFaults(rows) {
