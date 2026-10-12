@@ -167,6 +167,7 @@
     <button class="tab" data-tab="access">Access list<span class="count" id="access-count"></span></button>
     <button class="tab" data-tab="faults">Faults<span class="count" id="fault-count"></span></button>
     <button class="tab" data-tab="jobs">Recent jobs</button>
+    <button class="tab" data-tab="timing">Timing</button>
   </div>
 
   <!-- Overview -->
@@ -267,6 +268,27 @@
     <div class="card">
       <h2>Recent jobs · latest 100</h2>
       <div class="table-wrap"><table id="jobs-table"></table></div>
+    </div>
+  </section>
+
+  <!-- Timing (v13) -->
+  <section class="panel" id="p-timing">
+    <div class="card">
+      <div class="card-head">
+        <h2>Time per wire, by strip mode</h2><span class="spacer"></span>
+        <button class="btn small" id="timing-dl">⬇ CSV (all rows)</button>
+      </div>
+      <div class="table-wrap"><table id="timing-mode-table"></table></div>
+      <p class="hint" style="margin-top:10px">Time per wire = start of the feed until the wire is ejected. Mean ± SD is pooled over every wire of that mode. Mode is what actually ran (a Pull row over 5 cm runs as No-pull).</p>
+    </div>
+    <div class="card">
+      <h2>Colour change</h2>
+      <div class="table-wrap"><table id="timing-change-table"></table></div>
+      <p class="hint" style="margin-top:10px">Colour change = retract the old wire + home the new one. First load = homing at the start of a job (nothing to retract).</p>
+    </div>
+    <div class="card">
+      <h2>Rows · latest 100</h2>
+      <div class="table-wrap"><table id="timing-rows-table"></table></div>
     </div>
   </section>
 </div>
@@ -380,6 +402,7 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
   document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "p-" + t.dataset.tab));
   try { localStorage.setItem("admin-tab", t.dataset.tab); } catch (e) {}
+  if (t.dataset.tab === "timing" && login && $("app").style.display === "block") loadTiming();
 }));
 try {
   const saved = localStorage.getItem("admin-tab");
@@ -387,6 +410,16 @@ try {
 } catch (e) {}
 
 $("refresh-btn").onclick = () => loadAll();
+
+// Auto-refresh so spool % / grams follow the machine without clicking Refresh.
+// Only runs while signed in and the tab is visible; refreshes at once when you come back to the tab.
+const AUTO_REFRESH_MS = 20 * 1000;
+setInterval(() => {
+  if (login && $("app").style.display === "block" && !document.hidden) loadAll();
+}, AUTO_REFRESH_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && login && $("app").style.display === "block") loadAll();
+});
 
 // ═════════ SD card wipe ═════════
 // Goes through Supabase (admin_sd_wipe); the machine picks it up while idle.
@@ -435,6 +468,8 @@ async function loadAll(fromLogin) {
   adminEmailRows = d.admin_emails || []; renderAdminEmails();
   renderFaults(d.faults || []);
   renderJobs(d.jobs || []);
+  // Timing is its own (bigger) call - only fetched while its tab is open.
+  if (document.querySelector(".tab.active")?.dataset.tab === "timing") loadTiming();
   clearTimeout(sdWipePoll);
   if (renderSdWipe(d.sd_wipe)) sdWipePoll = setTimeout(() => loadAll(), 10000);   // refresh until the machine confirms
   return true;
@@ -689,6 +724,55 @@ function renderJobs(rows) {
       <td class="num">${r.duration_s == null ? "—" : Math.round(r.duration_s) + " s"}</td></tr>`),
     "No jobs yet.");
 }
+
+// ═════════ Timing (v13) ═════════
+// Separate call, so the rest of the page still works before
+// supabase_v13_timing.sql has been run.
+let timingRows = [];
+const MODE_NAME = { pull: "Pull", nopull: "No-pull", cut: "Cut-only" };
+const pm = (m, s, dp = 2) => (m == null) ? "—" : num(m, dp) + (s == null ? "" : " ± " + num(s, dp));
+
+async function loadTiming() {
+  let t;
+  try { t = await rpc("admin_timing"); }
+  catch (e) {
+    $("timing-mode-table").innerHTML = `<tr><td class="empty">Timing not available yet - run supabase_v13_timing.sql in Supabase. (${esc(e.message)})</td></tr>`;
+    return;
+  }
+  table($("timing-mode-table"),
+    [{ label: "Mode" }, { label: "Rows", num: 1 }, { label: "Wires", num: 1 }, { label: "Time per wire (s)", num: 1 }, { label: "Min (s)", num: 1 }, { label: "Max (s)", num: 1 }],
+    (t.by_routine || []).map(r => `<tr><td>${esc(MODE_NAME[r.routine] || r.routine)}</td>
+      <td class="num">${r.rows}</td><td class="num">${r.wires}</td>
+      <td class="num">${pm(r.mean_s, r.sd_s)}</td><td class="num">${num(r.min_s, 2)}</td><td class="num">${num(r.max_s, 2)}</td></tr>`),
+    "No timing data yet - run a job on the v13 firmware.");
+  const c = t.change || {}, f = t.first_load || {};
+  table($("timing-change-table"),
+    [{ label: "" }, { label: "Count", num: 1 }, { label: "Total (s)", num: 1 }, { label: "Retract (s)", num: 1 }, { label: "Home (s)", num: 1 }, { label: "Min–max (s)", num: 1 }],
+    [`<tr><td>Colour change</td><td class="num">${c.changes || 0}</td><td class="num">${pm(c.mean_s, c.sd_s)}</td>
+       <td class="num">${num(c.retract_mean_s, 2)}</td><td class="num">${num(c.home_mean_s, 2)}</td>
+       <td class="num">${c.changes ? num(c.min_s, 2) + "–" + num(c.max_s, 2) : "—"}</td></tr>`,
+     `<tr><td>First load</td><td class="num">${f.loads || 0}</td><td class="num">${pm(f.mean_s, f.sd_s)}</td>
+       <td class="num">—</td><td class="num">${pm(f.mean_s, null)}</td><td class="num">—</td></tr>`],
+    "");
+  timingRows = t.rows || [];
+  table($("timing-rows-table"),
+    [{ label: "When" }, { label: "Student" }, { label: "Row", num: 1 }, { label: "Colour" }, { label: "Mode" }, { label: "Ins / F / B (cm)" },
+     { label: "Wires", num: 1 }, { label: "Change (s)", num: 1 }, { label: "Per wire (s)", num: 1 }],
+    timingRows.slice(0, 100).map(r => `<tr><td class="muted" style="white-space:nowrap">${esc(fmtTz(r.recorded_at))}</td>
+      <td>${esc(r.email || "—")}</td><td class="num">${r.row_no ?? "—"}</td><td>${esc(r.colour || "—")}</td>
+      <td>${esc(MODE_NAME[r.routine] || r.routine || "—")}</td>
+      <td class="mono">${num(r.insulator_cm, 1)} / ${num(r.front_cm, 1)} / ${num(r.back_cm, 1)}</td>
+      <td class="num">${r.wires}</td>
+      <td class="num">${r.home_s == null ? "—" : num((r.retract_s || 0) + r.home_s, 2)}</td>
+      <td class="num">${pm(r.wire_mean_s, r.wires > 1 ? r.wire_sd_s : null)}</td></tr>`),
+    "No timing data yet.");
+}
+
+$("timing-dl").onclick = () => downloadCsv("wire_timing.csv",
+  [["recorded_at", "email", "csv_file", "row_no", "colour", "routine", "insulator_cm", "front_cm", "back_cm",
+    "wires", "retract_s", "home_s", "wire_mean_s", "wire_sd_s", "wire_min_s", "wire_max_s"]]
+  .concat(timingRows.map(r => [r.recorded_at, r.email, r.csv_file, r.row_no, r.colour, r.routine, r.insulator_cm, r.front_cm,
+    r.back_cm, r.wires, r.retract_s, r.home_s, r.wire_mean_s, r.wire_sd_s, r.wire_min_s, r.wire_max_s])));
 
 // ═════════ Start ═════════
 // Stay signed in while this tab is open.
