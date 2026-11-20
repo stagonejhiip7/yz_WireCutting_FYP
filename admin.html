@@ -117,6 +117,9 @@
   .reason { color: #ffb4b4; }
 
   .search { max-width: 260px; }
+  .gbar { height: 8px; min-width: 110px; background: #0d0f15; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; margin-top: 5px; }
+  .gbar > div { height: 100%; }
+  td.over { color: var(--red); font-weight: 700; }
   textarea.input { min-height: 110px; resize: vertical; line-height: 1.5; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   .banner { border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 14px; border: 1px solid; }
@@ -163,6 +166,7 @@
 
   <div class="tabs" id="tabs">
     <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="groups">Groups<span class="count" id="group-count"></span></button>
     <button class="tab" data-tab="usage">Usage by student</button>
     <button class="tab" data-tab="access">Access list<span class="count" id="access-count"></span></button>
     <button class="tab" data-tab="faults">Faults<span class="count" id="fault-count"></span></button>
@@ -185,14 +189,49 @@
     </div>
 
     <div class="card">
-      <div class="card-head"><h2>Machine SD card</h2><span class="spacer"></span><span class="hint" id="sd-wipe-status"></span></div>
-      <p class="hint" style="margin:0 0 12px">Deletes every job file (.csv) on the machine's SD card. The machine does it the next time it is idle and online (it checks every 30 s). Requests expire after 1 hour.</p>
-      <button class="btn danger" id="sd-wipe-btn">🗑 Delete all SD files</button>
+      <div class="card-head"><h2>Job files on the machine</h2><span class="spacer"></span><span class="hint" id="sd-wipe-status"></span></div>
+      <p class="hint" style="margin:0 0 12px">Deletes every uploaded job file (.csv) from the machine. The machine does it the next time it is idle and online (it checks every 30 s). Requests expire after 1 hour.</p>
+      <button class="btn danger" id="sd-wipe-btn">🗑 Delete all job files</button>
     </div>
 
     <div class="card">
       <h2>Daily use · last 14 days</h2>
       <div class="table-wrap"><table id="daily-table"></table></div>
+    </div>
+  </section>
+
+  <!-- Groups (v16) -->
+  <section class="panel" id="p-groups">
+    <div class="card">
+      <div class="card-head">
+        <h2>Wire used by each group</h2><span class="spacer"></span>
+        <span class="hint" id="group-since"></span>
+        <button class="btn small" id="group-dl">⬇ CSV</button>
+      </div>
+      <div id="group-banner"></div>
+      <div class="table-wrap"><table id="group-table"></table></div>
+      <div class="row" style="margin-top:14px">
+        <label class="hint" for="limit-input">Wire limit per group</label>
+        <input class="input" id="limit-input" type="number" min="0.1" step="0.1" style="max-width:90px">
+        <span class="hint">m</span>
+        <button class="btn small" id="limit-save">Save</button>
+        <span class="spacer"></span>
+        <button class="btn small danger" id="usage-reset">Reset usage to 0</button>
+        <span class="msg" id="group-msg" style="margin-top:0"></span>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        Every group shares one wire limit. The machine adds up the wire length of every job cut by the group's
+        students and refuses a job that would go past the limit. "Reset usage" starts counting from zero again
+        (e.g. for a new semester) - the job history is kept. Students with no group and admin emails have no limit.
+        Put students in groups on the <strong>Access list</strong> tab.
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Students in groups</h2><span class="spacer"></span>
+        <input class="input search" id="member-search" placeholder="Search group, name or email…">
+      </div>
+      <div class="table-wrap"><table id="member-table"></table></div>
     </div>
   </section>
 
@@ -214,7 +253,7 @@
     <div class="card">
       <h2>Add students</h2>
       <div id="access-banner"></div>
-      <textarea class="input" id="access-input" placeholder="Paste emails — one per line, comma separated, or copied straight from a spreadsheet. Anything that isn't an email is ignored."></textarea>
+      <textarea class="input" id="access-input" placeholder="One student per line:  group,email&#10;ME01,abcd0001@student.monash.edu&#10;ME01,efgh0002@student.monash.edu&#10;ME02,ijkl0003@student.monash.edu"></textarea>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="access-add">＋ Add emails</button>
         <label class="btn" for="access-file">📄 Upload CSV / TXT</label>
@@ -223,17 +262,19 @@
         <span class="msg" id="access-msg" style="margin-top:0"></span>
       </div>
       <p class="hint" style="margin-top:10px">
-        Easiest: download the student template, fill it in with Excel (one student per row), save as CSV, then upload it.
-        <strong>allowed_students.csv</strong> uses the same columns (name, student_id, email), so you can download it,
-        edit it and upload it again. Only the email decides who can use the machine. You can also paste rows straight
-        from Excel, or any list of emails.
+        <strong>Simplest:</strong> type one student per line as <span class="mono">group,email</span> - e.g.
+        <span class="mono">ME01,abcd0001@student.monash.edu</span> - here or in a .csv file. You can also write a group
+        name on its own line and list its emails underneath. The student template adds optional name and student ID
+        columns (group, name, student_id, email); <strong>allowed_students.csv</strong> uses the same columns, so you can
+        download it, edit it and upload it again. Uploading a student again moves them to the new group. Only the
+        email decides who can use the machine; the group decides whose wire limit a job counts against.
       </p>
     </div>
 
     <div class="card">
       <div class="card-head">
         <h2>Allowed students</h2><span class="spacer"></span>
-        <input class="input search" id="access-search" placeholder="Search name, ID or email…">
+        <input class="input search" id="access-search" placeholder="Search group, name, ID or email…">
         <button class="btn small" id="access-dl">⬇ allowed_students.csv</button>
         <button class="btn small danger" id="access-clear">Remove all</button>
       </div>
@@ -439,7 +480,7 @@ function renderSdWipe(w) {
 }
 
 $("sd-wipe-btn").onclick = async () => {
-  if (!confirm("Delete ALL job files on the machine's SD card?\nThis can't be undone.")) return;
+  if (!confirm("Delete ALL job files on the machine?\nThis can't be undone.")) return;
   $("sd-wipe-btn").disabled = true;
   try {
     await rpc("admin_sd_wipe");
@@ -450,6 +491,7 @@ $("sd-wipe-btn").onclick = async () => {
 
 // ═════════ Load everything ═════════
 let usageRows = [], accessRows = [], adminEmailRows = [];
+let groupRows = [], memberUsedCm = {}, wireLimit = null;   // v16 (wireLimit null = SQL upgrade not run)
 
 async function loadAll(fromLogin) {
   let d;
@@ -465,6 +507,10 @@ async function loadAll(fromLogin) {
   renderDaily(d.daily || []);
   usageRows = d.usage || [];  renderUsage();
   accessRows = d.access || []; renderAccess();
+  groupRows = d.groups || [];
+  memberUsedCm = Object.fromEntries((d.member_usage || []).map(m => [m.email, m.used_cm || 0]));
+  wireLimit = d.wire_limit || null;
+  renderGroups();
   adminEmailRows = d.admin_emails || []; renderAdminEmails();
   renderFaults(d.faults || []);
   renderJobs(d.jobs || []);
@@ -522,19 +568,90 @@ function renderDaily(rows) {
 // ═════════ Usage by student ═════════
 function renderUsage() {
   const q = $("usage-search").value.trim().toLowerCase();
-  const rows = usageRows.filter(r => !q || (r.email || "").includes(q));
+  const grpOf = groupByEmail();
+  const rows = usageRows.filter(r => !q || (r.email || "").includes(q) || (grpOf[r.email] || "").toLowerCase().includes(q));
   table($("usage-table"),
-    [{ label: "Student" }, { label: "Jobs", num: 1 }, { label: "Wires", num: 1 }, { label: "Wire length (m)", num: 1 }, { label: "Last used" }],
+    [{ label: "Student" }, { label: "Group" }, { label: "Jobs", num: 1 }, { label: "Wires", num: 1 }, { label: "Wire length (m)", num: 1 }, { label: "Last used" }],
     rows.map(r => `<tr>
       <td>${r.email ? esc(r.email) : '<span class="muted">(no email in file)</span>'}</td>
+      <td>${grpOf[r.email] ? esc(grpOf[r.email]) : '<span class="muted">—</span>'}</td>
       <td class="num">${r.sessions}</td><td class="num">${r.total_wires}</td>
       <td class="num">${num(r.total_wire_m, 2)}</td><td class="muted">${esc(fmtMyt(r.last_used_myt))}</td></tr>`),
     q ? "No match." : "Nobody has used the machine yet.");
 }
 $("usage-search").oninput = () => renderUsage();
 $("usage-dl").onclick = () => downloadCsv("wire_usage_by_student.csv",
-  [["email", "jobs", "wires", "wire_m", "last_used_myt"],
-   ...usageRows.map(r => [r.email || "", r.sessions, r.total_wires, r.total_wire_m, r.last_used_myt])]);
+  [["email", "group", "jobs", "wires", "wire_m", "last_used_myt"],
+   ...usageRows.map(r => [r.email || "", groupByEmail()[r.email] || "", r.sessions, r.total_wires, r.total_wire_m, r.last_used_myt])]);
+
+// ═════════ Groups (v16) ═════════
+function groupByEmail() { return Object.fromEntries(accessRows.filter(r => r.grp).map(r => [r.email, r.grp])); }
+function groupMsg(cls, text) { const m = $("group-msg"); m.className = "msg " + cls; m.textContent = text; }
+
+function renderGroups() {
+  $("group-count").textContent = groupRows.length ? `(${groupRows.length})` : "";
+  if (!wireLimit) {
+    $("group-banner").innerHTML = '<div class="banner open">Groups are not set up in the database yet - run <strong>supabase_v16_groups.sql</strong> in Supabase (SQL Editor), then refresh.</div>';
+    $("group-table").innerHTML = ""; $("member-table").innerHTML = ""; $("group-since").textContent = "";
+    return;
+  }
+  $("group-banner").innerHTML = "";
+  const lim = wireLimit.group_limit_cm;
+  if (document.activeElement !== $("limit-input")) $("limit-input").value = +(lim / 100).toFixed(2);
+  $("group-since").textContent = wireLimit.usage_since ? "Counting since " + fmtTz(wireLimit.usage_since) : "Counting every job so far";
+
+  table($("group-table"),
+    [{ label: "Group" }, { label: "Students", num: 1 }, { label: "Used (m)", num: 1 }, { label: "Left (m)", num: 1 }, { label: "Used of limit" }, { label: "Last job" }],
+    groupRows.map(g => {
+      const used = g.used_cm || 0, left = Math.max(0, lim - used), pct = lim > 0 ? used / lim * 100 : 0;
+      const colour = pct >= 99.9 ? "var(--red)" : pct > 75 ? "var(--amber)" : "var(--green)";
+      return `<tr><td><strong>${esc(g.grp)}</strong></td><td class="num">${g.students}</td>
+        <td class="num">${num(used / 100, 2)}</td><td class="num${left <= 0 ? " over" : ""}">${num(left / 100, 2)}</td>
+        <td>${Math.round(pct)}%<div class="gbar"><div style="width:${Math.min(100, pct)}%;background:${colour}"></div></div></td>
+        <td class="muted">${g.last_used ? esc(fmtTz(g.last_used)) : "—"}</td></tr>`;
+    }),
+    "No groups yet - add students with a group on the Access list tab.");
+
+  const q = $("member-search").value.trim().toLowerCase();
+  const members = accessRows.filter(r => r.grp && (!q ||
+    [r.grp, r.email, r.name].some(v => (v || "").toLowerCase().includes(q))));
+  table($("member-table"),
+    [{ label: "Group" }, { label: "Name" }, { label: "Email" }, { label: "Wire used (m)", num: 1 }],
+    members.map(r => `<tr><td><strong>${esc(r.grp)}</strong></td>
+      <td>${r.name ? esc(r.name) : '<span class="muted">—</span>'}</td><td class="mono">${esc(r.email)}</td>
+      <td class="num">${num((memberUsedCm[r.email] || 0) / 100, 2)}</td></tr>`),
+    q ? "No match." : "No students in a group yet.");
+}
+$("member-search").oninput = () => renderGroups();
+
+$("limit-save").onclick = async () => {
+  const m = parseFloat($("limit-input").value);
+  if (!(m > 0)) { groupMsg("warn", "Type a limit in metres, e.g. 8."); return; }
+  try {
+    await rpc("admin_wire_limit", { p_limit_m: m });
+    $("limit-input").blur();
+    groupMsg("ok", `Limit set to ${m} m per group.`);
+    await loadAll();
+  } catch (e) { groupMsg("bad", e.message); }
+};
+$("limit-input").addEventListener("keydown", e => { if (e.key === "Enter") $("limit-save").click(); });
+
+$("usage-reset").onclick = async () => {
+  if (!confirm("Reset every group's wire usage to 0?\nJobs cut before now stop counting towards the limit. The job history is kept.")) return;
+  try {
+    await rpc("admin_wire_limit", { p_reset: true });
+    groupMsg("ok", "Usage reset - every group starts from 0.");
+    await loadAll();
+  } catch (e) { groupMsg("bad", e.message); }
+};
+
+$("group-dl").onclick = () => {
+  const lim = wireLimit ? wireLimit.group_limit_cm : 0;
+  downloadCsv("wire_usage_by_group.csv",
+    [["group", "students", "used_m", "left_m", "limit_m", "last_job"],
+     ...groupRows.map(g => [g.grp, g.students, ((g.used_cm || 0) / 100).toFixed(2),
+       (Math.max(0, lim - (g.used_cm || 0)) / 100).toFixed(2), (lim / 100).toFixed(2), g.last_used || ""])]);
+};
 
 // ═════════ Access list ═════════
 function renderAccess() {
@@ -545,10 +662,11 @@ function renderAccess() {
     : `<div class="banner open">🔓 The list is empty, so <strong>every</strong> student can use the machine. Add emails to restrict it.</div>`;
   const q = $("access-search").value.trim().toLowerCase();
   const rows = accessRows.filter(r => !q ||
-    [r.email, r.name, r.student_id].some(v => (v || "").toLowerCase().includes(q)));
+    [r.email, r.name, r.student_id, r.grp].some(v => (v || "").toLowerCase().includes(q)));
   table($("access-table"),
-    [{ label: "Name" }, { label: "Student ID" }, { label: "Email" }, { label: "Added" }, { label: "" }],
-    rows.map(r => `<tr><td>${r.name ? esc(r.name) : '<span class="muted">—</span>'}</td>
+    [{ label: "Group" }, { label: "Name" }, { label: "Student ID" }, { label: "Email" }, { label: "Added" }, { label: "" }],
+    rows.map(r => `<tr><td>${r.grp ? "<strong>" + esc(r.grp) + "</strong>" : '<span class="muted">—</span>'}</td>
+      <td>${r.name ? esc(r.name) : '<span class="muted">—</span>'}</td>
       <td class="mono">${r.student_id ? esc(r.student_id) : '<span class="muted">—</span>'}</td>
       <td class="mono">${esc(r.email)}</td><td class="muted">${esc(fmtTz(r.added_at))}</td>
       <td class="num"><button class="btn small danger" data-remove="${esc(r.email)}">Remove</button></td></tr>`),
@@ -559,7 +677,7 @@ $("access-search").oninput = () => renderAccess();
 function accessMsg(cls, text) { const m = $("access-msg"); m.className = "msg " + cls; m.textContent = text; }
 
 // Same columns for the template, the download and the upload.
-const STUDENT_COLS = ["name", "student_id", "email"];
+const STUDENT_COLS = ["group", "name", "student_id", "email"];
 
 // Splits one CSV / Excel-paste line into cells (handles "quoted, cells").
 function splitLine(line) {
@@ -579,12 +697,19 @@ function splitLine(line) {
   return out;
 }
 
-// Reads the template format (name, student_id, email - any order, header
-// row optional). Lines without a header fall back to "find the email in
-// the line, the other cells are name then ID".
+// A cell that looks like a group code: ME01, G1, 3, TEAM-2, ME01A.
+const GROUP_CODE_RE = /^[A-Za-z]{0,8}[-_ ]?\d{1,4}[A-Za-z]?$/;
+
+// Reads the student list. All of these work, and can be mixed:
+//   * a header row (group, name, student_id, email - any order, any subset
+//     that includes email), then one student per row
+//   * no header:  ME01,abcd0001@student.monash.edu   (group,email)
+//   * a group name on its own line, then that group's emails underneath
+// Returns [{group, name, student_id, email}]; group may be "".
 function parseStudents(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
   let col = null;
+  let heading = "";          // group from the last "group name on its own line"
   const rows = [];
   for (const line of lines) {
     const cells = splitLine(line);
@@ -592,27 +717,40 @@ function parseStudents(text) {
     if (!col && lower.includes("email")) {         // header row
       col = {
         email: lower.indexOf("email"),
-        name: lower.findIndex(c => c === "name" || c === "studentname" || c === "fullname"),
-        id: lower.findIndex(c => c === "studentid" || c === "id" || c === "studentno" || c === "studentnumber"),
+        name:  lower.findIndex(c => c === "name" || c === "studentname" || c === "fullname"),
+        id:    lower.findIndex(c => c === "studentid" || c === "id" || c === "studentno" || c === "studentnumber"),
+        group: lower.findIndex(c => c === "group" || c === "grp" || c === "groupname" || c === "team"),
       };
       continue;
     }
-    let email, name = "", id = "";
-    if (col) {
-      email = (cells[col.email] || "").match(EMAIL_RE)?.[0];
-      name = col.name >= 0 ? cells[col.name] || "" : "";
-      id   = col.id   >= 0 ? cells[col.id]   || "" : "";
-    } else {
-      // No header: every email on the line; if it's one row, take the
-      // other cells as name + ID.
-      const found = line.match(EMAIL_RE) || [];
-      if (found.length !== 1) { found.forEach(e => rows.push({ email: e.toLowerCase() })); continue; }
-      email = found[0];
-      const rest = cells.filter(c => !c.includes("@"));
-      name = rest.find(c => /[a-z]/i.test(c)) || "";
-      id   = rest.find(c => /^\d{5,}$/.test(c)) || "";
+
+    const found = line.match(EMAIL_RE) || [];
+    if (!found.length) {
+      // No email on this line. A single cell is a group heading for the
+      // emails that follow ("ME01" or "ME01:").
+      const filled = cells.filter(c => c);
+      if (filled.length === 1) heading = filled[0].replace(/:$/, "").trim();
+      continue;
     }
-    if (email) rows.push({ name, student_id: id, email: email.toLowerCase() });
+
+    let email, name = "", id = "", group = "";
+    if (col) {
+      email = (cells[col.email] || "").match(EMAIL_RE)?.[0] || found[0];
+      name  = col.name  >= 0 ? cells[col.name]  || "" : "";
+      id    = col.id    >= 0 ? cells[col.id]    || "" : "";
+      group = col.group >= 0 ? cells[col.group] || "" : "";
+    } else if (found.length !== 1) {
+      // Several emails on one line: all in the current group.
+      found.forEach(e => rows.push({ group: heading.toUpperCase(), name: "", student_id: "", email: e.toLowerCase() }));
+      continue;
+    } else {
+      email = found[0];
+      const rest = cells.filter(c => c && !c.includes("@"));
+      id    = rest.find(c => /^\d{5,}$/.test(c)) || "";
+      group = rest.find(c => c !== id && GROUP_CODE_RE.test(c)) || "";
+      name  = rest.find(c => c !== id && c !== group && /[a-z]/i.test(c)) || "";
+    }
+    rows.push({ group: (group || heading).toUpperCase(), name, student_id: id, email: email.toLowerCase() });
   }
   return rows;
 }
@@ -626,7 +764,9 @@ async function addEmails(text) {
     const added = await rpc("admin_students_add", { p_rows: rows });
     const unique = new Set(rows.map(r => r.email)).size;
     const skipped = unique - added;
-    accessMsg("ok", `Added ${added}` + (skipped ? ` (${skipped} already on the list - names/IDs updated)` : "") + ".");
+    const groups = new Set(rows.map(r => r.group).filter(Boolean)).size;
+    accessMsg("ok", `Added ${added}` + (skipped ? ` (${skipped} already on the list - updated)` : "") +
+      (groups ? ` · ${groups} group${groups === 1 ? "" : "s"}` : " · no groups given") + ".");
     $("access-input").value = "";
     await loadAll();
   } catch (e) { accessMsg("bad", e.message); }
@@ -660,11 +800,12 @@ $("access-clear").onclick = async () => {
 };
 $("access-template").onclick = () => downloadCsv("student_template.csv", [
   STUDENT_COLS,
-  ["Example Student", "12345678", "exam0001@student.monash.edu"],
-  ["Another Student", "87654321", "anot0002@student.monash.edu"],
+  ["ME01", "Example Student", "12345678", "exam0001@student.monash.edu"],
+  ["ME01", "Another Student", "87654321", "anot0002@student.monash.edu"],
+  ["ME02", "Third Student",   "11223344", "thir0003@student.monash.edu"],
 ]);
 $("access-dl").onclick = () => downloadCsv("allowed_students.csv",
-  [STUDENT_COLS, ...accessRows.map(r => [r.name || "", r.student_id || "", r.email])]);
+  [STUDENT_COLS, ...accessRows.map(r => [r.grp || "", r.name || "", r.student_id || "", r.email])]);
 
 // ═════════ Admin emails ═════════
 function renderAdminEmails() {

@@ -139,6 +139,18 @@
       margin-top: 0.6rem;
     }
 
+    /* v16: "wire left" check */
+    .wire-row { display: flex; gap: 6px; margin-top: 0.7rem; }
+    .wire-row input {
+      flex: 1; min-width: 0; background: #151821; border: 1px solid #2a2d3a; border-radius: 8px;
+      padding: 0.6rem 0.7rem; color: #e0e0e0; font-family: inherit; font-size: 0.85rem; outline: none;
+    }
+    .wire-row input:focus { border-color: #4a90d9; }
+    .wire-row .btn { margin: 0; }
+    .wire-result { margin-top: 0.8rem; font-size: 0.8rem; line-height: 1.6; color: #aaa; min-height: 1rem; }
+    .wire-bar { height: 8px; background: #0d0f15; border: 1px solid #2a2d3a; border-radius: 5px; overflow: hidden; margin-top: 6px; }
+    .wire-bar > div { height: 100%; }
+
   </style>
 </head>
 <body>
@@ -160,11 +172,21 @@
     </button>
 
     <div class="countdown" id="countdown"></div>
+
     <div class="note" id="note" style="display:none"></div>
 
     <hr class="divider"/>
     <div class="updated" id="last-updated">Last seen: —</div>
     <div class="hint">You must be on the same network as the machine.</div>
+
+    <hr class="divider"/>
+    <div class="updated">How much wire has my group left?</div>
+    <form class="wire-row" onsubmit="checkWire(); return false;">
+      <input id="wire-email" placeholder="Your ID, e.g. jlee0213" autocomplete="username"
+             autocapitalize="off" spellcheck="false" maxlength="60">
+      <button class="btn btn-ghost" type="submit">Check</button>
+    </form>
+    <div class="wire-result" id="wire-result"></div>
   </div>
 
   <script>
@@ -338,20 +360,12 @@
       return `${days} day${days === 1 ? "" : "s"}`;
     }
 
+    // v17: no automatic jump to the machine. The same site is now also
+    // used at home (drawing / viewing a breadboard), where the machine's
+    // address cannot be reached - so the student presses Connect.
     function scheduleRedirect(ip) {
-      let secs = 3;
-      text("countdown", `Redirecting in ${secs}s...`);
       clearInterval(countdownTimer);
-      countdownTimer = setInterval(() => {
-        secs--;
-        if (secs <= 0) {
-          clearInterval(countdownTimer);
-          text("countdown", "Connecting...");
-          go(ip);
-        } else {
-          text("countdown", `Redirecting in ${secs}s...`);
-        }
-      }, 1000);
+      text("countdown", "Press Connect to open the machine");
     }
 
     function connectNow() {
@@ -363,6 +377,47 @@
 
     function go(ip) {
       window.location.href = `http://${ip}${ESP32_PATH}`;
+    }
+
+    // ── v16: group wire allowance ──────────────────────────────────────
+    // Typing here pauses the automatic redirect to the machine.
+    const wireEmail = document.getElementById("wire-email");
+    wireEmail.addEventListener("focus", () => {
+      clearInterval(countdownTimer);
+      text("countdown", currentIP ? "Press Connect to open the machine" : "");
+    });
+
+    async function checkWire() {
+      const out = document.getElementById("wire-result");
+      let email = wireEmail.value.trim().toLowerCase();
+      if (!email) { out.textContent = "Type your student ID or email first."; return; }
+      if (!email.includes("@")) email += "@student.monash.edu";
+      out.textContent = "Checking...";
+      try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/wire_allowance`, {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+          body: JSON.stringify({ p_email: email }),
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const a = await res.json();
+        const m = cm => (cm / 100).toFixed(2) + " m";
+        if (!a.allowed) {
+          out.textContent = `${email} is not on the access list - ask your lecturer to add you.`;
+        } else if (!a.group) {
+          out.textContent = `${email} is not in a group, so there is no wire limit.`;
+        } else {
+          const pct = a.limit_cm > 0 ? Math.min(100, a.used_cm / a.limit_cm * 100) : 0;
+          const colour = pct >= 99.9 ? "#ff4d4d" : pct > 75 ? "#ffaa00" : "#00d97e";
+          out.innerHTML = `Group <strong style="color:#e0e0e0"></strong>: <strong style="color:${colour}">${m(a.left_cm)} left</strong>` +
+            `<br>${m(a.used_cm)} used of ${m(a.limit_cm)}` +
+            `<div class="wire-bar"><div style="width:${pct}%;background:${colour}"></div></div>`;
+          out.querySelector("strong").textContent = a.group;   // as text, not HTML
+        }
+      } catch (e) {
+        out.textContent = "Could not check right now (" + e.message + ").";
+      }
     }
 
     fetchIP();
